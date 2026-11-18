@@ -1,0 +1,41 @@
+
+name: Daily Stock Briefing
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+      timezone: "Pacific/Auckland"
+
+  workflow_dispatch:
+
+jobs:
+  daily-stock-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libcurl4-openssl-dev \
+            libcjson-dev \
+            pkg-config
+
+      - name: Compile C application
+        run: make
+
+      - name: Generate and send stock report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
+
+        run: ./stock-briefing

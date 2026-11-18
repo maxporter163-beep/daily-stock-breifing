@@ -1,0 +1,11 @@
+# Compiled application
+stock-briefing
+
+# Secrets and local configuration
+.env
+.env.*
+*.key
+secrets/
+
+# Temporary files
+*.log
