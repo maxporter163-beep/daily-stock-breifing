@@ -47,6 +47,11 @@ a failed run. Use WebSearch, and use WebFetch to open the most useful
 results; search snippets alone are not enough. Run independent searches in
 parallel.
 
+Hard minimums: about 30 searches in total, and at least one WebFetch of a
+source article or announcement for every watchlist stock and for each
+discovery candidate (so 15 or more fetches). If a page will not load, fetch
+another source for that stock.
+
 Minimum coverage:
 
 - **Market** (at least 3 searches): the latest NZX 50 close and drivers;
@@ -85,6 +90,10 @@ found. Search again for any stock that falls short.
 
 Follow the format in the research brief. Write it in Markdown, with inline
 source links, and save it to `output/briefing.md` in the session.
+
+The briefing's date is the NZ date on the "Generated:" line at the top of
+the research pack. Never use the next or previous day, whatever time the
+run happens.
 
 Do not commit or push anything to git. The briefing is delivered through
 the session's final message, not the repository.
