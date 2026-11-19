@@ -1,10 +1,15 @@
-SMI
-FPH
-MCY
-IVW
-MFT
-MEL
-EBO
-NPF
-RKLB
-ETPMAG
+# Watchlist - one Yahoo Finance symbol per line, optional "# note".
+# Exchange suffixes keep tickers unambiguous:
+#   .NZ = NZX, .AX = ASX, no suffix = US listing.
+# Edit this file to change which stocks are researched each day.
+
+SMI.NZ      # Santana Minerals (NZX code SMI; also ASX SMI.AX)
+FPH.NZ      # Fisher & Paykel Healthcare
+MCY.NZ      # Mercury NZ
+IVW         # iShares S&P 500 Growth ETF (NYSE Arca)
+MFT.NZ      # Mainfreight
+MEL.NZ      # Meridian Energy
+EBO.NZ      # EBOS Group
+NPF.NZ      # Smartshares NZ Property ETF
+RKLB        # Rocket Lab (Nasdaq)
+ETPMAG.AX   # Global X Physical Silver (ASX)

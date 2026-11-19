@@ -9,3 +9,5 @@ secrets/
 
 # Temporary files
 *.log
+# Generated research input packs
+output/

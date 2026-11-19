@@ -1,15 +1,15 @@
 
-name: Daily Stock Briefing
+# Build check only. The daily briefing itself runs as a Claude Code cloud
+# scheduled task (see README.md), so this workflow needs no secrets.
+name: Build and test
 
 on:
-  schedule:
-    - cron: "0 8 * * *"
-      timezone: "Pacific/Auckland"
-
+  push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
-  daily-stock-report:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -17,25 +17,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            libcurl4-openssl-dev \
-            libcjson-dev \
-            pkg-config
+        run: bash scripts/cloud-setup.sh
 
       - name: Compile C application
         run: make
 
-      - name: Generate and send stock report
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+      - name: Offline smoke test
+        run: make test
 
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
-          PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
-
-        run: ./stock-briefing
+      - name: Live data run (informational)
+        continue-on-error: true
+        run: |
+          mkdir -p output
+          ./stock-briefing --output output/research-input.md > /dev/null
+          head -12 output/research-input.md

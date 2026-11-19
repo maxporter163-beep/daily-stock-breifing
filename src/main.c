@@ -1,389 +1,198 @@
+/*
+ * main.c - Daily stock briefing: data-gathering stage.
+ *
+ * This program no longer calls any AI API or SMS service. It:
+ *   1. reads the watchlist (config/stocks.txt) and market list
+ *      (config/market.txt),
+ *   2. fetches a delayed price snapshot for every symbol,
+ *   3. prints a Markdown "research input pack" for Claude Code, which
+ *      does the research and writes the final briefing.
+ *
+ * Progress messages go to stderr so stdout contains only the pack.
+ *
+ * Exit codes: 0 = pack written (even if some quotes failed),
+ *             1 = fatal error (no watchlist, bad arguments, write failure).
+ */
+#define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <curl/curl.h>
-#include <cjson/cJSON.h>
 
-#define MAX_STOCKS 100
+#include "quotes.h"
+#include "report.h"
+#include "watchlist.h"
+
+#define DEFAULT_STOCKS "config/stocks.txt"
+#define DEFAULT_MARKET "config/market.txt"
+
+/* Pause between requests so we do not hammer the data provider. */
+#define REQUEST_GAP_MS 250
 
 typedef struct {
-    char *data;
-    size_t size;
-} Response;
+    const char *stocks_path;
+    const char *market_path;
+    const char *output_path; /* NULL = stdout only */
+    int offline;
+} Options;
 
-/* Store HTTP response */
-static size_t write_callback(void *contents,
-                             size_t size,
-                             size_t nmemb,
-                             void *userp) {
-    size_t total = size * nmemb;
-    Response *response = (Response *)userp;
-
-    char *new_data = realloc(response->data,
-                             response->size + total + 1);
-
-    if (!new_data) return 0;
-
-    response->data = new_data;
-
-    memcpy(response->data + response->size,
-           contents, total);
-
-    response->size += total;
-    response->data[response->size] = '\0';
-
-    return total;
+static void usage(FILE *out) {
+    fprintf(out,
+        "Usage: stock-briefing [options]\n\n"
+        "Gathers market data for the watchlist and prints a research input\n"
+        "pack (Markdown) for Claude Code to turn into the daily briefing.\n\n"
+        "Options:\n"
+        "  --stocks FILE   watchlist file (default %s)\n"
+        "  --market FILE   market indices/FX file (default %s)\n"
+        "  --output FILE   also write the pack to FILE\n"
+        "  --offline       do not fetch prices (for testing)\n"
+        "  --help          show this help\n",
+        DEFAULT_STOCKS, DEFAULT_MARKET);
 }
 
-/* Read stock watchlist */
-char *read_stocks(void) {
-    FILE *file = fopen("config/stocks.txt", "r");
+/* Parse command-line options. Returns 1 on success, 0 to exit. */
+static int parse_args(int argc, char **argv, Options *opts, int *exit_code) {
+    opts->stocks_path = DEFAULT_STOCKS;
+    opts->market_path = DEFAULT_MARKET;
+    opts->output_path = NULL;
+    opts->offline = 0;
 
-    if (!file) {
-        fprintf(stderr, "Cannot open stocks.txt\n");
-        return NULL;
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        int has_value = i + 1 < argc;
+
+        if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
+            usage(stdout);
+            *exit_code = 0;
+            return 0;
+        } else if (strcmp(arg, "--offline") == 0) {
+            opts->offline = 1;
+        } else if (strcmp(arg, "--stocks") == 0 && has_value) {
+            opts->stocks_path = argv[++i];
+        } else if (strcmp(arg, "--market") == 0 && has_value) {
+            opts->market_path = argv[++i];
+        } else if (strcmp(arg, "--output") == 0 && has_value) {
+            opts->output_path = argv[++i];
+        } else {
+            fprintf(stderr, "Unknown or incomplete option: %s\n\n", arg);
+            usage(stderr);
+            *exit_code = 1;
+            return 0;
+        }
     }
+    return 1;
+}
 
-    char *stocks = calloc(1, 8192);
-    char line[256];
+static void pause_ms(long ms) {
+    struct timespec gap = { ms / 1000, (ms % 1000) * 1000000L };
+    nanosleep(&gap, NULL);
+}
 
-    if (!stocks) {
-        fclose(file);
-        return NULL;
-    }
+/* Fetch (or skip) a quote for every symbol in a list. */
+static void collect_quotes(const Watchlist *list, Quote *quotes,
+                           int offline, const char *label) {
+    for (int i = 0; i < list->count; i++) {
+        const char *symbol = list->items[i].symbol;
 
-    while (fgets(line, sizeof(line), file)) {
-        if (line[0] == '#' || line[0] == '\n')
+        if (offline) {
+            skip_quote(symbol, &quotes[i]);
             continue;
-
-        if (strlen(stocks) + strlen(line) >= 8192)
-            break;
-
-        strcat(stocks, line);
-    }
-
-    fclose(file);
-    return stocks;
-}
-
-/* Make a POST request to Claude */
-char *get_claude_report(const char *stocks) {
-
-    const char *api_key = getenv("ANTHROPIC_API_KEY");
-    const char *model = getenv("CLAUDE_MODEL");
-
-    if (!api_key || !model) {
-        fprintf(stderr, "Missing Claude API configuration\n");
-        return NULL;
-    }
-
-    CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
-
-    Response response = {0};
-
-    cJSON *root = cJSON_CreateObject();
-
-    cJSON_AddStringToObject(root, "model", model);
-    cJSON_AddNumberToObject(root, "max_tokens", 1800);
-
-    cJSON *tools = cJSON_AddArrayToObject(root, "tools");
-    cJSON *search = cJSON_CreateObject();
-
-    cJSON_AddStringToObject(search, "type",
-                            "web_search_20250305");
-    cJSON_AddStringToObject(search, "name", "web_search");
-    cJSON_AddNumberToObject(search, "max_uses", 8);
-
-    cJSON_AddItemToArray(tools, search);
-
-    cJSON *messages = cJSON_AddArrayToObject(root, "messages");
-    cJSON *message = cJSON_CreateObject();
-
-    cJSON_AddStringToObject(message, "role", "user");
-
-    char prompt[12000];
-
-    snprintf(prompt, sizeof(prompt),
-
-        "You are my daily Wall Street equity research analyst.\n\n"
-
-        "Research these stocks:\n%s\n"
-
-        "Produce a concise daily investment research briefing.\n\n"
-
-        "FOR EACH STOCK INCLUDE:\n"
-
-        "1. Analyst consensus:\n"
-        "   - Buy, Hold and Sell ratings.\n"
-        "   - Number of analysts in each category.\n"
-        "   - Consensus rating.\n\n"
-
-        "2. Price target changes:\n"
-        "   - Recent analyst upgrades or downgrades.\n"
-        "   - Previous and revised price targets.\n"
-        "   - Analyst firm and date of change.\n"
-        "   - Consensus price target and implied upside/downside "
-        "if reliable current share-price data is available.\n\n"
-
-        "3. Key catalysts:\n"
-        "   - Upcoming earnings announcements.\n"
-        "   - Product launches and company announcements.\n"
-        "   - Industry developments.\n"
-        "   - Regulatory developments.\n"
-        "   - Important risks and negative developments.\n\n"
-
-        "4. Overall outlook:\n"
-        "   - Most important development affecting the stock.\n"
-        "   - Bullish and bearish considerations.\n"
-        "   - What investors should watch next.\n\n"
-
-        "RESEARCH RULES:\n"
-        "- Search the web for current information.\n"
-        "- Prioritise the latest available analyst data.\n"
-        "- Clearly distinguish new developments from older news.\n"
-        "- Never invent analyst ratings or price targets.\n"
-        "- State when data is unavailable or unverified.\n"
-        "- Include dates and credible source links.\n"
-        "- Distinguish factual information from analyst opinion.\n"
-        "- Do not give personalised buy/sell instructions.\n\n"
-
-        "FORMAT:\n"
-        "Start with today's date.\n"
-        "Use clear headings for each ticker.\n"
-        "Finish with the three most important developments "
-        "across the entire watchlist.\n"
-        "Keep the SMS briefing concise, ideally around "
-        "1200 characters. Prioritise useful information.",
-
-        stocks
-    );
-
-    cJSON_AddStringToObject(message, "content", prompt);
-    cJSON_AddItemToArray(messages, message);
-
-    char *json = cJSON_PrintUnformatted(root);
-
-    struct curl_slist *headers = NULL;
-
-    headers = curl_slist_append(headers,
-        "Content-Type: application/json");
-
-    headers = curl_slist_append(headers,
-        "anthropic-version: 2023-06-01");
-
-    char auth_header[512];
-    snprintf(auth_header, sizeof(auth_header),
-             "x-api-key: %s", api_key);
-
-    headers = curl_slist_append(headers, auth_header);
-
-    curl_easy_setopt(curl, CURLOPT_URL,
-        "https://api.anthropic.com/v1/messages");
-
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 180L);
-
-    CURLcode result = curl_easy_perform(curl);
-
-    long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-
-    char *report = NULL;
-
-    if (result == CURLE_OK && status >= 200 && status < 300) {
-
-        cJSON *parsed = cJSON_Parse(response.data);
-        cJSON *content = cJSON_GetObjectItem(parsed, "content");
-
-        if (cJSON_IsArray(content)) {
-            size_t capacity = 1;
-            size_t used = 0;
-            report = calloc(1, capacity);
-
-            cJSON *block;
-
-            cJSON_ArrayForEach(block, content) {
-                cJSON *type = cJSON_GetObjectItem(block, "type");
-                cJSON *text = cJSON_GetObjectItem(block, "text");
-
-                if (cJSON_IsString(type) &&
-                    strcmp(type->valuestring, "text") == 0 &&
-                    cJSON_IsString(text)) {
-
-                    size_t len = strlen(text->valuestring);
-
-                    char *next = realloc(report, used + len + 2);
-
-                    if (!next) {
-                        free(report);
-                        report = NULL;
-                        break;
-                    }
-
-                    report = next;
-
-                    if (used > 0)
-                        report[used++] = '\n';
-
-                    memcpy(report + used, text->valuestring, len);
-                    used += len;
-                    report[used] = '\0';
-                }
-            }
         }
 
-        cJSON_Delete(parsed);
+        if (i > 0) pause_ms(REQUEST_GAP_MS);
+        fetch_quote(symbol, &quotes[i]);
 
-    } else {
-        fprintf(stderr, "Claude API error: %ld\n", status);
-        if (response.data)
-            fprintf(stderr, "%s\n", response.data);
+        fprintf(stderr, "  [%s %d/%d] %-12s %s%s%s\n", label, i + 1,
+                list->count, symbol, quote_status_label(quotes[i].status),
+                quotes[i].status == QUOTE_OK ? "" : " - ",
+                quotes[i].status == QUOTE_OK ? "" : quotes[i].error);
     }
-
-    free(response.data);
-    free(json);
-    cJSON_Delete(root);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    return report;
-}
-
-/* Send report through Twilio */
-int send_sms(const char *report) {
-
-    const char *sid = getenv("TWILIO_ACCOUNT_SID");
-    const char *token = getenv("TWILIO_AUTH_TOKEN");
-    const char *from = getenv("TWILIO_FROM");
-    const char *to = getenv("PHONE_NUMBER");
-
-    if (!sid || !token || !from || !to) {
-        fprintf(stderr, "Missing Twilio configuration\n");
-        return 0;
-    }
-
-    CURL *curl = curl_easy_init();
-    if (!curl) return 0;
-
-    char *encoded_body = curl_easy_escape(curl, report, 0);
-    char *encoded_from = curl_easy_escape(curl, from, 0);
-    char *encoded_to = curl_easy_escape(curl, to, 0);
-
-    if (!encoded_body || !encoded_from || !encoded_to) {
-        curl_free(encoded_body);
-        curl_free(encoded_from);
-        curl_free(encoded_to);
-        curl_easy_cleanup(curl);
-        return 0;
-    }
-
-    char *post_data = malloc(
-        strlen(encoded_body) +
-        strlen(encoded_from) +
-        strlen(encoded_to) + 32
-    );
-
-    if (!post_data) {
-        curl_free(encoded_body);
-        curl_free(encoded_from);
-        curl_free(encoded_to);
-        curl_easy_cleanup(curl);
-        return 0;
-    }
-
-    sprintf(post_data, "Body=%s&From=%s&To=%s",
-            encoded_body, encoded_from, encoded_to);
-
-    char url[256];
-
-    snprintf(url, sizeof(url),
-        "https://api.twilio.com/2010-04-01/"
-        "Accounts/%s/Messages.json", sid);
-
-    Response response = {0};
-
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
-
-    curl_easy_setopt(curl, CURLOPT_USERNAME, sid);
-    curl_easy_setopt(curl, CURLOPT_PASSWORD, token);
-
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
-
-    CURLcode result = curl_easy_perform(curl);
-
-    long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-
-    int success = (result == CURLE_OK &&
-                   status >= 200 && status < 300);
-
-    if (success) {
-        printf("SMS successfully submitted to Twilio.\n");
-    } else {
-        fprintf(stderr, "SMS failed: HTTP %ld\n", status);
-        if (response.data)
-            fprintf(stderr, "%s\n", response.data);
-    }
-
-    free(post_data);
-    free(response.data);
-
-    curl_free(encoded_body);
-    curl_free(encoded_from);
-    curl_free(encoded_to);
-
-    curl_easy_cleanup(curl);
-
-    return success;
 }
 
 /* Main program */
-int main(void) {
+int main(int argc, char **argv) {
+    Options opts;
+    int exit_code = 0;
+
+    if (!parse_args(argc, argv, &opts, &exit_code))
+        return exit_code;
+
+    /* All human-facing times are shown in New Zealand time. */
+    setenv("TZ", "Pacific/Auckland", 1);
+    tzset();
+
+    fprintf(stderr, "Starting daily stock briefing data collection...\n");
+
+    /* Large arrays live on the heap, not the stack. */
+    Watchlist *stocks = calloc(1, sizeof(*stocks));
+    Watchlist *market = calloc(1, sizeof(*market));
+    Quote *stock_quotes = calloc(MAX_STOCKS, sizeof(*stock_quotes));
+    Quote *market_quotes = calloc(MAX_STOCKS, sizeof(*market_quotes));
+
+    if (!stocks || !market || !stock_quotes || !market_quotes) {
+        fprintf(stderr, "Out of memory.\n");
+        exit_code = 1;
+        goto cleanup;
+    }
+
+    if (read_stocks(opts.stocks_path, stocks) <= 0) {
+        fprintf(stderr, "Stock watchlist is empty.\n");
+        exit_code = 1;
+        goto cleanup;
+    }
+
+    /* The market list is optional: the briefing still works without it. */
+    if (read_stocks(opts.market_path, market) < 0)
+        fprintf(stderr, "Continuing without market indices.\n");
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    printf("Starting daily stock briefing...\n");
+    fprintf(stderr, "Fetching market snapshot (%d symbols)...\n",
+            market->count);
+    collect_quotes(market, market_quotes, opts.offline, "market");
 
-    char *stocks = read_stocks();
+    fprintf(stderr, "Fetching watchlist snapshot (%d symbols)...\n",
+            stocks->count);
+    collect_quotes(stocks, stock_quotes, opts.offline, "stock");
 
-    if (!stocks || strlen(stocks) == 0) {
-        fprintf(stderr, "Stock watchlist is empty.\n");
-        free(stocks);
-        curl_global_cleanup();
-        return 1;
-    }
-
-    printf("Generating Claude research report...\n");
-
-    char *report = get_claude_report(stocks);
-
-    free(stocks);
-
-    if (!report || strlen(report) == 0) {
-        fprintf(stderr, "Failed to generate report.\n");
-        free(report);
-        curl_global_cleanup();
-        return 1;
-    }
-
-    printf("Research report generated.\n");
-
-    printf("Sending SMS...\n");
-
-    int success = send_sms(report);
-
-    free(report);
     curl_global_cleanup();
 
-    return success ? 0 : 1;
+    RunInfo info = {
+        .generated_at = time(NULL),
+        .offline = opts.offline,
+        .stocks_path = opts.stocks_path,
+        .market_path = opts.market_path,
+    };
+
+    print_research_pack(stdout, &info, stocks, stock_quotes,
+                        market, market_quotes);
+
+    if (opts.output_path) {
+        FILE *file = fopen(opts.output_path, "w");
+        if (!file) {
+            fprintf(stderr, "Cannot write %s\n", opts.output_path);
+            exit_code = 1;
+            goto cleanup;
+        }
+        print_research_pack(file, &info, stocks, stock_quotes,
+                            market, market_quotes);
+        if (fclose(file) != 0) {
+            fprintf(stderr, "Error writing %s\n", opts.output_path);
+            exit_code = 1;
+            goto cleanup;
+        }
+        fprintf(stderr, "Research input pack written to %s\n",
+                opts.output_path);
+    }
+
+    fprintf(stderr, "Done.\n");
+
+cleanup:
+    free(stocks);
+    free(market);
+    free(stock_quotes);
+    free(market_quotes);
+    return exit_code;
 }

@@ -1,0 +1,11 @@
+# Market context for the "overall market" section of the briefing.
+# Same format as stocks.txt: one Yahoo Finance symbol per line, "# note".
+
+^NZ50       # S&P/NZX 50 (gross)
+^AXJO       # S&P/ASX 200
+^GSPC       # S&P 500
+^IXIC       # Nasdaq Composite
+NZDUSD=X    # NZD/USD
+GC=F        # Gold futures
+SI=F        # Silver futures
+CL=F        # WTI crude oil futures
