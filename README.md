@@ -27,8 +27,8 @@ market data, and Claude Code does the research and writing.
         |     1. market snapshot   2. watchlist snapshot
         |     3. data-quality notes   4. research brief (the instructions)
         v
-  Claude reads the pack, researches with web search, and writes
-  briefings/YYYY-MM-DD.md   -> pushed to branch claude/briefings
+  Claude reads the pack, researches with web search and page fetches,
+  and writes the briefing (nothing is pushed to git)
         |
         v
   PushNotification -> Claude mobile app;
@@ -120,16 +120,24 @@ In Claude Code, opened in this repository, ask:
 
 > Follow prompts/daily-briefing.md
 
-Run locally, it will also try to push to `claude/briefings` and send a
-push notification. Tell it to skip those steps if you only want the
-briefing.
+The briefing appears as Claude's final message and in
+`output/briefing.md`. Run locally, Claude will also try to send a push
+notification.
 
 ## Setting up the daily scheduled task
 
 The task runs in Anthropic's cloud, so your computer does not need to be
 on. You need a Claude Pro, Max, Team or Enterprise plan, with this
 repository pushed to GitHub and Claude connected to your GitHub account.
-Runs use your subscription's normal usage.
+The task only reads the repository, so read access is enough. Runs use
+your subscription's normal usage.
+
+### Reading the briefing
+
+Each run's briefing is the final message of its session. On your phone,
+open the Claude app, go to **Code**, and open the latest
+"Daily stock briefing" session. Past briefings stay in the task's
+**History**.
 
 ### 1. Cloud environment
 
@@ -171,8 +179,9 @@ Press **Run now** on the task. Then check:
 
 1. The run built the program and the pack shows quotes as `OK` (not all
    `UNAVAILABLE`).
-2. A briefing appeared in the session, and `briefings/<date>.md` is on
-   the `claude/briefings` branch.
+2. A complete briefing is the session's final message. Its "Run notes"
+   say how many searches ran and whether any stock lacked recent
+   information.
 3. Your phone received the push notification. Enable notifications for
    the Claude app on your phone. The docs list `PushNotification` for
    cloud sessions, but its delivery from scheduled runs has to be
